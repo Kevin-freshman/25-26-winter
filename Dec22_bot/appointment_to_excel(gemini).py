@@ -3,6 +3,7 @@ import pandas as pd
 import time
 import os
 import re
+from datetime import datetime
 
 # ---------------- 配置信息 ----------------
 URL = "https://emsvip.linkedlife.cn/"
@@ -13,234 +14,246 @@ EXCEL_PATH = "appointments.xlsx"
 
 # ---------------- 工具函数 ----------------
 
-def clean_id(raw: str) -> str:
-    """清洗会员ID，去除可能的干扰字符"""
-    return raw.strip() if raw else ""
-
-def is_blue_card(rgb_string: str) -> bool:
+def parse_date_time(raw_time_str):
     """
-    判断背景颜色是否为浅蓝色。
-    逻辑：解析 'rgb(r, g, b)' 格式。
-    黄色/米色通常是 Red 和 Green 很高，Blue 较低 (如 255, 255, 200)。
-    蓝色通常是 Blue 值最高，或者 Red 值明显较低。
+    解析时间字符串，例如 "2025/12/22 10:30 - 11:15"
+    返回: ("12月22日", "10:30")
     """
-    if not rgb_string:
-        return False
-    
-    # 使用正则提取数字
-    match = re.search(r"rgb\((\d+),\s*(\d+),\s*(\d+)\)", rgb_string)
-    if not match:
-        return False # 无法识别颜色，默认跳过
-    
-    r, g, b = map(int, match.groups())
+    if not raw_time_str:
+        return "", ""
+    try:
+        # 取第一部分 "2025/12/22 10:30"
+        parts = raw_time_str.split("-")[0].strip()
+        dt = datetime.strptime(parts, "%Y/%m/%d %H:%M")
+        
+        # 格式化为 Excel 需要的格式
+        date_str = dt.strftime("%m月%d日").lstrip("0").replace("月0", "月") # 12月22日
+        time_str = dt.strftime("%H:%M") # 10:30
+        return date_str, time_str
+    except Exception as e:
+        print(f"时间解析失败: {raw_time_str}, 错误: {e}")
+        return raw_time_str, ""
 
-    # --- 颜色判断阈值 (根据经验调整) ---
-    # 浅蓝色特征: Blue 分量通常很高 (例如 > 200)，且通常大于 Red
-    # 浅黄色特征: Red 和 Green 很高，Blue 相对较低
-    
-    # 这里的逻辑是：如果 蓝色分量 > 红色分量，或者 B > 200 且 R < 240，倾向于认为是蓝色卡片
-    # 你可以根据实际打印出来的数值微调这里
-    if b > r and b > 200:
-        return True
-    
-    # 额外的蓝色判断：如果背景偏冷色调
-    if b > 220 and r < 230:
-        return True
-
-    return False
-
-def already_exists(member_id: str, date_str: str) -> bool:
-    """
-    判断是否已存在。建议同时校验 会员号 和 预约时间，防止同一人多次预约被漏掉。
-    """
+def get_next_index():
+    """获取 Excel 下一个序号"""
     if not os.path.exists(EXCEL_PATH):
-        return False
-    df = pd.read_excel(EXCEL_PATH)
-    
-    # 简单校验会员号，如果需要更精准，可以加 try-except 校验日期
-    if "会员号" in df.columns:
-        return member_id in df["会员号"].astype(str).values
-    return False
+        return 1
+    try:
+        df = pd.read_excel(EXCEL_PATH)
+        if "序号" in df.columns and not df.empty:
+            # 获取最大序号并 +1
+            return int(df["序号"].max()) + 1
+        return 1
+    except:
+        return 1
 
-def save_to_excel(row: dict):
-    df_new = pd.DataFrame([row])
+def save_to_excel(raw_data: dict):
+    """
+    将抓取的数据转换为用户指定的 Excel 格式
+    目标列: [序号, 上门日期, 具体时间, 顾客姓名, 病历号/会员卡号, 来源渠道]
+    """
+    # 1. 解析日期和时间
+    date_str, time_str = parse_date_time(raw_data.get("预约时间", ""))
+    
+    # 2. 构建新的一行数据
+    new_row = {
+        "序号": get_next_index(),
+        "上门日期": date_str,
+        "具体时间": time_str,
+        "顾客姓名": raw_data.get("姓名", ""),
+        "病历号/会员卡号": raw_data.get("会员号", ""),
+        "来源渠道": raw_data.get("客户来源", "")
+    }
+
+    df_new = pd.DataFrame([new_row])
+
+    # 3. 读取或创建 Excel
     if os.path.exists(EXCEL_PATH):
         df_old = pd.read_excel(EXCEL_PATH)
-        # 转换会员号为字符串，防止科学计数法
-        if "会员号" in df_old.columns:
-            df_old["会员号"] = df_old["会员号"].astype(str)
+        # 确保卡号是字符串，防止变成科学计数法
+        if "病历号/会员卡号" in df_old.columns:
+            df_old["病历号/会员卡号"] = df_old["病历号/会员卡号"].astype(str)
         df = pd.concat([df_old, df_new], ignore_index=True)
     else:
         df = df_new
+        # 设置列顺序
+        cols = ["序号", "上门日期", "具体时间", "顾客姓名", "病历号/会员卡号", "来源渠道"]
+        df = df[cols]
     
     df.to_excel(EXCEL_PATH, index=False)
-    print(f"✅ [保存成功] 客户: {row.get('姓名', '未知')} | 项目: {row.get('项目', '未知')}")
+    print(f"✅ [写入成功] 序号: {new_row['序号']} | 姓名: {new_row['顾客姓名']}")
+
+def is_blue_card(rgb_string: str) -> bool:
+    """颜色判断逻辑：蓝色才处理"""
+    if not rgb_string: return False
+    match = re.search(r"rgb\((\d+),\s*(\d+),\s*(\d+)\)", rgb_string)
+    if not match: return False
+    r, g, b = map(int, match.groups())
+    # 蓝色判定：B > R 且 B > 200 (排除黄色/米色)
+    if b > r and b > 200: return True
+    if b > 220 and r < 230: return True
+    return False
+
+def already_exists(member_id: str, date_check: str) -> bool:
+    """防止重复录入"""
+    if not os.path.exists(EXCEL_PATH): return False
+    df = pd.read_excel(EXCEL_PATH)
+    # 简单去重逻辑：如果同一个会员号，且日期（上门日期）也一样，则视为重复
+    # 注意：这里 date_check 传入的是 "12月22日" 这种格式
+    if "病历号/会员卡号" in df.columns and "上门日期" in df.columns:
+        # 筛选会员号
+        filtered = df[df["病历号/会员卡号"].astype(str) == str(member_id)]
+        if not filtered.empty:
+            # 检查日期是否也存在
+            if date_check in filtered["上门日期"].values:
+                return True
+    return False
 
 # ---------------- 页面行为 ----------------
 
 def login(page):
     print("正在登录...")
-    page.goto(URL, wait_until="networkidle", timeout=60000)
+    page.goto(URL, wait_until="domcontentloaded", timeout=60000)
     
-    # 填写登录表单
     page.locator("input[type='text']").nth(0).fill(COMPANY)
     page.locator("input[type='text']").nth(1).fill(USERNAME)
     page.locator("input[type='password']").fill(PASSWORD)
 
     page.get_by_role("button", name="登 录").click()
-    page.wait_for_url("**/dashboard_v2", timeout=200000) # 等待跳转
-    print("登录成功！")
+    
+    # --- 修复点 1: 不再等待特定 URL，而是等待菜单栏出现 ---
+    print("等待跳转到首页...")
+    try:
+        # 等待左侧菜单的“预约”二字出现，最长等 30 秒
+        page.wait_for_selector("text=预约", timeout=30000)
+        print("登录成功，检测到菜单栏。")
+    except:
+        print("⚠️ 登录后未检测到菜单，可能需要人工干预或网络太慢。")
 
 def goto_appointment_center(page):
     print("正在跳转到预约中心...")
-    # 1. 点击左侧 "预约" (确保侧边栏展开)
-    # 使用更精准的定位，防止点到其他文字
-    page.locator("li.menu-item:has-text('预约')").first.click()
-    time.sleep(1)
     
-    # 2. 点击 "预约中心"
-    page.locator("li.submenu-item:has-text('预约中心')").click()
-    
-    # 3. 等待日历视图加载完毕
-    # 观察图1，日历中包含 "fc-view" 或 "appointment-content" 等元素
-    page.wait_for_selector(".fc-view-container", timeout=20000)
-    time.sleep(3) # 额外等待数据渲染
-    print("已进入预约视图。")
+    # --- 修复点 2: 增强点击稳定性 ---
+    try:
+        # 1. 点击一级菜单 "预约"
+        # 使用模糊匹配，防止因为图标或空格导致匹配失败
+        menu_btn = page.locator("li").filter(has_text="预约").first
+        menu_btn.click()
+        time.sleep(1) # 等待子菜单动画展开
+        
+        # 2. 点击二级菜单 "预约中心"
+        sub_menu_btn = page.locator("li").filter(has_text="预约中心").first
+        
+        # 如果不可见，强制点击
+        if sub_menu_btn.is_visible():
+            sub_menu_btn.click()
+        else:
+            print("尝试强制点击预约中心...")
+            sub_menu_btn.click(force=True)
+
+        # 3. 等待日历视图加载
+        page.wait_for_selector(".fc-view-container", timeout=20000)
+        time.sleep(3) # 额外等待数据渲染
+        print("已进入预约视图。")
+        
+    except Exception as e:
+        print(f"跳转导航失败: {e}")
+        # 截图保存现场，方便调试
+        page.screenshot(path="error_nav.png")
 
 def extract_detail_from_modal(page) -> dict:
-    """从弹出的详情框（图3）中提取数据"""
+    """提取数据"""
     data = {}
     
-    # 等待弹窗内容加载
-    modal = page.locator(".ant-modal-content, .detail-modal").first
-    modal.wait_for(timeout=5000)
-
-    # 1. 提取头部基础信息 (图3上半部分)
-    # 姓名通常是最大的标题 h3, h4 或 class="name"
+    # 等待弹窗
+    page.locator(".ant-modal-content").first.wait_for(timeout=5000)
+    modal_text = page.locator(".ant-modal-body").inner_text()
+    
+    # 提取姓名 (尝试从头部获取)
     try:
-        # 尝试寻找包含性别图标旁边的名字
-        name_loc = page.locator("div.header-info .name, h4, .title").first
-        data["姓名"] = name_loc.inner_text().strip()
+        header = page.locator(".header-info").inner_text()
+        # 假设第一行是名字，或者是除去数字的部分
+        lines = header.split('\n')
+        name_candidate = lines[0].strip()
+        # 简单清洗，去掉性别符号等
+        data["姓名"] = re.sub(r'[^\u4e00-\u9fa5a-zA-Z]', '', name_candidate)
+        
+        # 提取会员号
+        id_match = re.search(r"\d{6,}", header)
+        data["会员号"] = id_match.group(0) if id_match else ""
     except:
         data["姓名"] = "未知"
+        data["会员号"] = ""
 
-    try:
-        # 会员号通常在皇冠图标或者 ID 图标旁边
-        # 假设它是纯数字或特定格式
-        text_content = page.locator(".header-info").inner_text()
-        # 简单粗暴正则提取 ID (假设是 10位以上数字)
-        id_match = re.search(r"\d{8,}", text_content)
-        data["会员号"] = id_match.group(0) if id_match else "未知"
-    except:
-        data["会员号"] = "未知"
-
-    # 2. 提取列表详情 (图3下半部分: 预约时间, 医生, 项目等)
-    # 遍历所有的 label 和 content
-    items = page.locator("div.detail-item, div.row-item") # 需要根据实际情况调整class
-    
-    # 如果找不到特定class，尝试遍历所有包含冒号的行
-    text_lines = page.locator(".ant-modal-body").inner_text().split('\n')
-    for line in text_lines:
+    # 提取列表项
+    for line in modal_text.split('\n'):
         if "：" in line:
-            parts = line.split("：", 1)
-            if len(parts) == 2:
-                key = parts[0].strip()
-                val = parts[1].strip()
-                data[key] = val
-
-    # 补充提取时间戳，作为去重依据
-    data["抓取时间"] = time.strftime("%Y-%m-%d %H:%M:%S")
-    
+            key, val = line.split("：", 1)
+            data[key.strip()] = val.strip()
+            
     return data
 
 def process_appointments(page):
-    """
-    核心逻辑：
-    1. 遍历日历上的所有卡片
-    2. 判断背景色：蓝色 -> 点击; 黄色 -> 跳过
-    3. 点击后提取 -> 关闭弹窗 -> 下一个
-    """
-    
-    # 定位日历中的所有预约块
-    # 根据图1，卡片通常有 class "fc-event" 或 "appointment-card"
-    card_selector = "a.fc-day-grid-event, div.event-item" 
-    
-    # 等待至少一个卡片出现，或者超时（可能当天无预约）
+    # 查找日历卡片
+    card_selector = "a.fc-day-grid-event"
     try:
         page.wait_for_selector(card_selector, timeout=10000)
     except:
-        print("未检测到预约卡片，结束。")
+        print("当前视图无预约。")
         return
 
     cards = page.locator(card_selector)
     count = cards.count()
-    print(f"当前视图共检测到 {count} 个预约卡片。")
+    print(f"检测到 {count} 个预约卡片。")
 
     for i in range(count):
-        # 重新获取卡片句柄，防止页面DOM刷新导致 stale element
         card = cards.nth(i)
         
-        # ---------------- 关键步骤：颜色识别 ----------------
-        # 获取计算后的背景颜色
+        # 颜色判断
         bg_color = card.evaluate("el => window.getComputedStyle(el).backgroundColor")
-        
-        # 调试输出颜色，方便你微调
-        # print(f"卡片 {i} 颜色: {bg_color}") 
-        
         if not is_blue_card(bg_color):
-            # 如果不是蓝色（即黄色/待确认），跳过
-            # print(f"卡片 {i} 是黄色/未到店，跳过。")
             continue
         
-        print(f"⚡ 发现【到店】卡片 (索引 {i})，准备处理...")
-
-        # ---------------- 点击与提取 ----------------
+        # 点击处理
         try:
+            print(f"处理第 {i+1} 个卡片...")
             card.click()
             
-            # 等待弹窗出现 (图3)
-            page.wait_for_selector("text=预约概览", timeout=5000)
+            # 提取
+            raw_data = extract_detail_from_modal(page)
             
-            # 提取数据
-            data = extract_detail_from_modal(page)
+            # 预处理日期以便查重
+            date_check, _ = parse_date_time(raw_data.get("预约时间", ""))
             
-            # 保存 (带去重)
-            if already_exists(data.get("会员号", ""), data.get("预约时间", "")):
-                print(f"   -> 跳过: {data.get('姓名')} (已存在)")
+            # 查重与保存
+            if already_exists(raw_data.get("会员号"), date_check):
+                print(f"   -> 跳过: {raw_data.get('姓名')} (已存在)")
             else:
-                save_to_excel(data)
-                
-            # ---------------- 关键步骤：关闭弹窗 ----------------
-            # 不用 go_back()，而是按 ESC 关闭弹窗，速度快且稳定
+                save_to_excel(raw_data)
+            
+            # 关闭弹窗
             page.keyboard.press("Escape")
-            time.sleep(0.5) # 等待动画消失
+            time.sleep(0.5)
             
         except Exception as e:
-            print(f"   -> 处理卡片 {i} 时出错: {e}")
-            # 如果出错，尝试按 ESC 恢复状态，防止阻塞后续
+            print(f"   -> 处理出错: {e}")
             page.keyboard.press("Escape")
 
 # ---------------- 主程序 ----------------
 
 def main():
     with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=False, # 设为 True 可后台运行
-            args=["--start-maximized"] # 最大化窗口，方便查看日历
-        )
+        browser = p.chromium.launch(headless=False, args=["--start-maximized"])
         context = browser.new_context(no_viewport=True)
         page = context.new_page()
 
-        try:
-            login(page)
-            goto_appointment_center(page)
-            process_appointments(page)
-            print("所有卡片处理完毕！")
-        except Exception as e:
-            print(f"运行出错: {e}")
-        finally:
-            time.sleep(3) # 观察一下结果再关闭
-            browser.close()
+        login(page)
+        goto_appointment_center(page)
+        process_appointments(page)
+        
+        print("任务完成，3秒后退出...")
+        time.sleep(3)
+        browser.close()
 
 if __name__ == "__main__":
     main()
